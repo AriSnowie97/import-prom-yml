@@ -1,18 +1,38 @@
 import os
+import json
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2 import service_account
 import xml.etree.ElementTree as ET
-import schedule
-import time
 from datetime import datetime
 from collections import defaultdict
 import hashlib
+from flask import Flask, Response
 
-# CDATA для описаний
+app = Flask(__name__)
+
+# =========================
+# Настройка Google Sheets
+# =========================
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+GOOGLE_CREDS = os.getenv("GOOGLE_CREDENTIALS")
+if not GOOGLE_CREDS:
+    raise Exception("Переменная окружения GOOGLE_CREDENTIALS не найдена!")
+
+creds_info = json.loads(GOOGLE_CREDS)
+creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+client = gspread.authorize(creds)
+
+# URL и листы таблицы
+SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1BBq14rbObiYNOWZGKkNsxW6_NZ4zx8t38zvnRPV0tPU/edit#gid=1613229251'
+RU_SHEET_NAME = 'catalog_new_ru'
+UA_SHEET_NAME = 'catalog_new'
+
+# =========================
+# Вспомогательные функции
+# =========================
 def add_cdata(element, text):
     element.text = f"<![CDATA[{text}]]>"
 
-# Генерация числового group_id
 def extract_group_id(product_code, counter_dict):
     digits = ''.join(filter(str.isdigit, product_code))
     if digits:
@@ -25,45 +45,27 @@ def extract_group_id(product_code, counter_dict):
         group_id = counter_dict[product_code]
     return str(group_id)
 
-def parse_and_generate_yml():
-    print("=== Старт обработки Google Sheets ===")
+# =========================
+# Основная генерация YML
+# =========================
+def generate_yml():
     counter_dict = {}
 
-    # Авторизация
-    from google.oauth2 import service_account
-        SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-        SERVICE_ACCOUNT_FILE = "credentials.json"
-
-        creds = service_account.Credentials.from_service_account_file(
-            SERVICE_ACCOUNT_FILE, scopes=SCOPES
-        )
-
+    # Читаем данные из Google Sheets
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(json_file_path, scope)
-        client = gspread.authorize(creds)
-        print("Авторизация успешна ✅")
-    except Exception as e:
-        print(f"Ошибка авторизации: {e}")
-        return
-
-    # Подключение к таблицам
-    spreadsheet_url = 'https://docs.google.com/spreadsheets/d/1BBq14rbObiYNOWZGKkNsxW6_NZ4zx8t38zvnRPV0tPU/edit#gid=1613229251'
-    try:
-        sheet_ru = client.open_by_url(spreadsheet_url).worksheet('catalog_new_ru')
-        sheet_ua = client.open_by_url(spreadsheet_url).worksheet('catalog_new')
+        sheet_ru = client.open_by_url(SPREADSHEET_URL).worksheet(RU_SHEET_NAME)
+        sheet_ua = client.open_by_url(SPREADSHEET_URL).worksheet(UA_SHEET_NAME)
         data_ru = sheet_ru.get_all_records()
         data_ua = sheet_ua.get_all_records()
-        print(f"Русских строк: {len(data_ru)}, Украинских строк: {len(data_ua)}")
     except Exception as e:
-        print(f"Ошибка доступа к Google Sheets: {e}")
-        return
+        return f"Ошибка доступа к Google Sheets: {e}", 500
 
     ua_mapping = {str(row['Product Code']).strip(): row for row in data_ua}
     grouped = defaultdict(list)
     for row in data_ru:
         grouped[str(row['Product Code']).strip()].append(row)
 
-    # Создание YML
+    # Создание XML
     yml_catalog = ET.Element('yml_catalog', date=datetime.now().strftime("%Y-%m-%d %H:%M"))
     shop = ET.SubElement(yml_catalog, 'shop')
     ET.SubElement(shop, 'name').text = 'Ego Textile'
@@ -79,120 +81,107 @@ def parse_and_generate_yml():
     offers = ET.SubElement(shop, 'offers')
 
     for product_code, items in grouped.items():
-        try:
-            if not items:
-                continue
+        if not items:
+            continue
+        main_item = items[0]
 
-            main_item = items[0]
-            name_ru = str(main_item.get('Name', '')).strip()
-            description_ru = str(main_item.get('Description', '')).strip()
-            price = str(main_item.get('Price', '')).replace('.0', '').strip()
-            country = str(main_item.get('Country of manufacture', '')).strip()
-            producer = str(main_item.get('Producer', '')).strip()
-            fabric_type = str(main_item.get('Fabric type', '')).strip()
-            density_raw = str(main_item.get('Density', '')).strip()
-            subcategory = str(main_item.get('Subcategory', '')).strip()
+        # RU данные
+        name_ru = str(main_item.get('Name', '')).strip()
+        description_ru = str(main_item.get('Description', '')).strip()
+        price = str(main_item.get('Price', '')).replace('.0', '').strip()
+        country = str(main_item.get('Country of manufacture', '')).strip()
+        producer = str(main_item.get('Producer', '')).strip()
+        fabric_type = str(main_item.get('Fabric type', '')).strip()
+        density_raw = str(main_item.get('Density', '')).strip()
+        subcategory = str(main_item.get('Subcategory', '')).strip()
 
-            ua_row = ua_mapping.get(product_code, {})
-            name_ua = str(ua_row.get('Name', '')).strip()
-            description_ua = str(ua_row.get('Description', '')).strip()
+        # UA данные
+        ua_row = ua_mapping.get(product_code, {})
+        name_ua = str(ua_row.get('Name', '')).strip()
+        description_ua = str(ua_row.get('Description', '')).strip()
 
-            density_digits = ''.join(filter(str.isdigit, density_raw))
-            density = density_digits[:3] if len(density_digits) >= 3 else density_digits
+        density_digits = ''.join(filter(str.isdigit, density_raw))
+        density = density_digits[:3] if len(density_digits) >= 3 else density_digits
 
-            if not all([product_code, name_ru, price]):
-                print(f"⚠️ Пропущена строка: {main_item}")
-                continue
+        if not all([product_code, name_ru, price]):
+            continue
 
-            # Генерируем числовой group_id
-            group_id = extract_group_id(product_code, counter_dict)
+        group_id = extract_group_id(product_code, counter_dict)
+        if not subcategory:
+            subcategory = "Основной комплект"
 
-            # Если нет Subcategory — добавляем уникальный параметр
-            if not subcategory:
-                subcategory = "Основной комплект"
+        # Главный оффер
+        offer_main = ET.SubElement(
+            offers, 'offer',
+            id=f"{product_code}_main",
+            available='true',
+            group_id=group_id
+        )
+        ET.SubElement(offer_main, 'name').text = name_ru
+        desc_elem = ET.SubElement(offer_main, 'description')
+        add_cdata(desc_elem, f"<h2>Описание комплекта</h2><p>{description_ru}</p>")
+        ET.SubElement(offer_main, 'name_ua').text = name_ua
+        desc_ua_elem = ET.SubElement(offer_main, 'description_ua')
+        add_cdata(desc_ua_elem, f"<h2>Опис комплекту</h2><p>{description_ua}</p>")
+        ET.SubElement(offer_main, 'price').text = price
+        ET.SubElement(offer_main, 'currencyId').text = 'UAH'
+        ET.SubElement(offer_main, 'categoryId').text = '40601'
+        ET.SubElement(offer_main, 'vendor').text = producer
+        ET.SubElement(offer_main, 'country_of_origin').text = country
+        ET.SubElement(offer_main, 'vendorCode').text = product_code
 
-            # Главный оффер
-            offer_main = ET.SubElement(
+        for i in range(1, 11):
+            photo = main_item.get(f'Main photo {i}', '')
+            if photo and photo.strip():
+                ET.SubElement(offer_main, 'picture').text = photo.strip()
+
+        if fabric_type:
+            ET.SubElement(offer_main, 'param', name='Тип тканини').text = fabric_type
+        if density:
+            ET.SubElement(offer_main, 'param', name='Плотність(г/м2)').text = density
+        ET.SubElement(offer_main, 'param', name='Тип комплекта').text = subcategory
+
+        # Вариации
+        for idx, var_item in enumerate(items[1:], start=1):
+            subcategory_var = str(var_item.get('Subcategory', '')).strip() or f"Вариант {idx}"
+            price_var = str(var_item.get('Price', '')).replace('.0', '').strip() or price
+
+            offer_var_id = f"{product_code}_{hashlib.md5(subcategory_var.encode()).hexdigest()[:8]}"
+            offer_var = ET.SubElement(
                 offers, 'offer',
-                id=f"{product_code}_main",
+                id=offer_var_id,
                 available='true',
                 group_id=group_id
             )
-            ET.SubElement(offer_main, 'name').text = name_ru
-            desc_elem = ET.SubElement(offer_main, 'description')
-            add_cdata(desc_elem, f"<h2>Описание комплекта</h2><p>{description_ru}</p>")
-            ET.SubElement(offer_main, 'name_ua').text = name_ua
-            desc_ua_elem = ET.SubElement(offer_main, 'description_ua')
-            add_cdata(desc_ua_elem, f"<h2>Опис комплекту</h2><p>{description_ua}</p>")
-            ET.SubElement(offer_main, 'price').text = price
-            ET.SubElement(offer_main, 'currencyId').text = 'UAH'
-            ET.SubElement(offer_main, 'categoryId').text = '40601'
-            ET.SubElement(offer_main, 'vendor').text = producer
-            ET.SubElement(offer_main, 'country_of_origin').text = country
-            ET.SubElement(offer_main, 'vendorCode').text = product_code
+            ET.SubElement(offer_var, 'name').text = f"{name_ru} {subcategory_var}".strip()
+            ET.SubElement(offer_var, 'price').text = price_var
+            ET.SubElement(offer_var, 'currencyId').text = 'UAH'
+            ET.SubElement(offer_var, 'categoryId').text = '40601'
+            ET.SubElement(offer_var, 'vendor').text = producer
+            ET.SubElement(offer_var, 'vendorCode').text = product_code
 
             for i in range(1, 11):
-                photo = main_item.get(f'Main photo {i}', '')
+                photo = var_item.get(f'Main photo {i}', '')
                 if photo and photo.strip():
-                    ET.SubElement(offer_main, 'picture').text = photo.strip()
+                    ET.SubElement(offer_var, 'picture').text = photo.strip()
 
-            # Главные характеристики
-            if fabric_type:
-                ET.SubElement(offer_main, 'param', name='Тип тканини').text = fabric_type
-            if density:
-                ET.SubElement(offer_main, 'param', name='Плотність(г/м2)').text = density
-            ET.SubElement(offer_main, 'param', name='Тип комплекта').text = subcategory
+            ET.SubElement(offer_var, 'param', name='Тип комплекта').text = subcategory_var
 
-            # Вариации — гарантированно уникальные
-            for idx, var_item in enumerate(items[1:], start=1):
-                subcategory_var = str(var_item.get('Subcategory', '')).strip()
-                if not subcategory_var or subcategory_var == subcategory:
-                    subcategory_var = f"Вариант {idx}"
+    # Генерация строки XML
+    xml_str = ET.tostring(yml_catalog, encoding="utf-8", method="xml")
+    return xml_str
 
-                price_var = str(var_item.get('Price', '')).replace('.0', '').strip() or price
+# =========================
+# Flask endpoint
+# =========================
+@app.route("/")
+def index():
+    xml_content = generate_yml()
+    return Response(xml_content, mimetype="application/xml")
 
-                offer_var_id = f"{product_code}_{hashlib.md5(subcategory_var.encode()).hexdigest()[:8]}"
-                offer_var = ET.SubElement(
-                    offers, 'offer',
-                    id=offer_var_id,
-                    available='true',
-                    group_id=group_id
-                )
-                ET.SubElement(offer_var, 'name').text = f"{name_ru} {subcategory_var}".strip()
-                ET.SubElement(offer_var, 'price').text = price_var
-                ET.SubElement(offer_var, 'currencyId').text = 'UAH'
-                ET.SubElement(offer_var, 'categoryId').text = '40601'
-                ET.SubElement(offer_var, 'vendor').text = producer
-                ET.SubElement(offer_var, 'vendorCode').text = product_code
-
-                for i in range(1, 11):
-                    photo = var_item.get(f'Main photo {i}', '')
-                    if photo and photo.strip():
-                        ET.SubElement(offer_var, 'picture').text = photo.strip()
-
-                # Уникальный параметр для Prom.ua
-                ET.SubElement(offer_var, 'param', name='Тип комплекта').text = subcategory_var
-
-        except Exception as e:
-            print(f"❌ Ошибка при обработке группы {product_code}: {e}")
-            continue
-
-    output_path = os.path.join(script_dir, "prom_feed.yml")
-    try:
-        tree = ET.ElementTree(yml_catalog)
-        ET.indent(tree, space="\t", level=0)
-        tree.write(output_path, encoding="utf-8", xml_declaration=True)
-        print(f"✅ YML файл успешно создан: {output_path}")
-    except Exception as e:
-        print(f"❌ Ошибка при записи файла: {e}")
-
-# Планировщик — каждые 4 часа
-schedule.every(4).hours.do(parse_and_generate_yml)
-
-# Первый запуск
-parse_and_generate_yml()
-print("Скрипт будет обновлять YML каждые 4 часа...")
-
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+# =========================
+# Запуск
+# =========================
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
