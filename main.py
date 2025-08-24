@@ -30,10 +30,13 @@ def parse_and_generate_yml():
     counter_dict = {}
 
     # Авторизация
-    scope = ['https://spreadsheets.google.com/feeds',
-             'https://www.googleapis.com/auth/drive']
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    json_file_path = os.path.join(script_dir, 'service_account.json')
+    from google.oauth2 import service_account
+        SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+        SERVICE_ACCOUNT_FILE = "credentials.json"
+
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SCOPES
+        )
 
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_name(json_file_path, scope)
