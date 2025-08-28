@@ -6,6 +6,7 @@ from collections import defaultdict
 import threading
 import time
 import hashlib
+import io
 
 from flask import Flask, Response
 import gspread
@@ -165,7 +166,14 @@ def parse_and_generate_yml():
             print(f"Ошибка обработки {product_code}: {e}")
             continue
 
-    xml_str = ET.tostring(yml_catalog, encoding="utf-8", method="xml")
+    # ----------------------------
+    # Сохранение с xml_declaration
+    # ----------------------------
+    tree = ET.ElementTree(yml_catalog)
+    buf = io.BytesIO()
+    tree.write(buf, encoding="utf-8", xml_declaration=True)
+    xml_str = buf.getvalue()
+
     with xml_lock:
         latest_xml = xml_str
     print(f"{datetime.now()}: YML обновлён.")
